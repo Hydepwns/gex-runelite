@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1" result="blur"/>
+      <feFlood flood-color="#a855f7" flood-opacity="0.7"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffec8b"/>
+      <stop offset="50%" style="stop-color:#ffd700"/>
+      <stop offset="100%" style="stop-color:#b8860b"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="35%" cy="35%" r="50%">
+      <stop offset="0%" style="stop-color:#fff;stop-opacity:0.6"/>
+      <stop offset="100%" style="stop-color:#fff;stop-opacity:0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Glow ring -->
+  <circle cx="8" cy="8" r="7" fill="none" stroke="#a855f7" stroke-width="0.5" opacity="0.5"/>
+
+  <!-- Coin -->
+  <g filter="url(#glow)">
+    <circle cx="8" cy="8.5" r="5.5" fill="#8b6914"/>
+    <circle cx="8" cy="8" r="5.5" fill="url(#gold)"/>
+    <circle cx="8" cy="8" r="4.5" fill="none" stroke="#8b6914" stroke-width="0.4" opacity="0.5"/>
+    <text x="8" y="10.5" font-family="Arial" font-size="6" font-weight="bold" fill="#8b6914" text-anchor="middle" opacity="0.7">G</text>
+    <circle cx="8" cy="8" r="5.5" fill="url(#shine)"/>
+  </g>
+
+  <!-- Sparkle -->
+  <circle cx="5.5" cy="5.5" r="0.5" fill="#fff" opacity="0.9"/>
+</svg>
