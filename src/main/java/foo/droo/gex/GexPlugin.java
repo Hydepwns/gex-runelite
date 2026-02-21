@@ -8,10 +8,14 @@ import net.runelite.api.Client;
 import net.runelite.api.GrandExchangeOffer;
 import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.widgets.ComponentID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.Notifier;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.input.KeyListener;
+import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -23,6 +27,7 @@ import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -75,7 +80,11 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     @Inject
     private ItemManager itemManager;
 
+    @Inject
+    private KeyManager keyManager;
+
     private GexApiClient apiClient;
+    private QuickPriceKeyListener quickPriceKeyListener;
     private GexPanel panel;
     private GexOverlay overlay;
     private NavigationButton navButton;
@@ -137,6 +146,10 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         overlay = new GexOverlay(client, config);
         overlayManager.add(overlay);
 
+        // Set up quick price hotkey
+        quickPriceKeyListener = new QuickPriceKeyListener();
+        keyManager.registerKeyListener(quickPriceKeyListener);
+
         scheduleHeartbeat();
         scheduleBatchSend();
         scheduleDataFetch();
@@ -148,6 +161,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
         clientToolbar.removeNavigation(navButton);
         overlayManager.remove(overlay);
+        keyManager.unregisterKeyListener(quickPriceKeyListener);
 
         if (heartbeatTask != null) {
             heartbeatTask.cancel(false);
@@ -833,6 +847,209 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         if (status && wasDisconnected) {
             evictedEventCount = 0;
             evictionWarningShown = false;
+        }
+    }
+
+    // Track last item/offer type when user starts setting up an offer
+    private volatile int lastSetupItemId = -1;
+    private volatile String lastSetupOfferType = "buy";
+
+    /**
+     * Check if the GE price chatbox is open.
+     */
+    private boolean isPriceChatboxOpen() {
+        Widget chatboxTitle = client.getWidget(ComponentID.CHATBOX_TITLE);
+        if (chatboxTitle == null || chatboxTitle.isHidden()) {
+            return false;
+        }
+        String text = chatboxTitle.getText();
+        return text != null && (text.contains("Set a price") || text.contains("price per item"));
+    }
+
+    /**
+     * Get the item ID for the offer being set up.
+     * Uses the most recent offer that's in BUYING or SELLING state with partial fill.
+     */
+    private int getCurrentOfferItemId() {
+        // First check if we have a tracked setup item
+        if (lastSetupItemId > 0) {
+            return lastSetupItemId;
+        }
+
+        // Fall back to finding an active offer being set up
+        GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
+        if (offers == null) {
+            return -1;
+        }
+
+        // Look for slots that are in the process of being set up
+        for (GrandExchangeOffer offer : offers) {
+            if (offer != null && offer.getItemId() > 0) {
+                GrandExchangeOfferState state = offer.getState();
+                // BUYING/SELLING with 0 filled = being set up
+                if ((state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.SELLING)
+                        && offer.getQuantitySold() == 0) {
+                    lastSetupItemId = offer.getItemId();
+                    lastSetupOfferType = state == GrandExchangeOfferState.SELLING ? "sell" : "buy";
+                    return offer.getItemId();
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Get the offer type (buy/sell) for the current setup.
+     */
+    private String getCurrentOfferType() {
+        // Ensure we've populated the setup info
+        if (lastSetupItemId <= 0) {
+            getCurrentOfferItemId();
+        }
+        return lastSetupOfferType;
+    }
+
+    /**
+     * Clear the setup tracking when offers change significantly.
+     */
+    private void clearSetupTracking() {
+        lastSetupItemId = -1;
+        lastSetupOfferType = "buy";
+    }
+
+    /**
+     * Inject a price into the chatbox input.
+     */
+    private void injectPrice(int price) {
+        Widget chatboxInput = client.getWidget(ComponentID.CHATBOX_FULL_INPUT);
+        if (chatboxInput != null && !chatboxInput.isHidden()) {
+            String priceStr = price + "*";
+            chatboxInput.setText(priceStr);
+            log.debug("Injected quick price: {}", priceStr);
+        }
+    }
+
+    /**
+     * Fetch and inject quick price for the current GE offer.
+     */
+    private void fetchAndInjectQuickPrice() {
+        int itemId = getCurrentOfferItemId();
+        if (itemId <= 0) {
+            log.debug("No item selected for quick price");
+            return;
+        }
+
+        String offerType = getCurrentOfferType();
+
+        apiClient.fetchQuickPriceAsync(itemId, offerType, new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.warn("Failed to fetch quick price: {}", e.getMessage());
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful() && response.body() != null) {
+                        String body = response.body().string();
+                        Map<String, Object> data = GSON.fromJson(body, Map.class);
+
+                        if (data != null && data.containsKey("optimal_price")) {
+                            Number optimalPrice = (Number) data.get("optimal_price");
+                            if (optimalPrice != null) {
+                                int price = optimalPrice.intValue();
+                                // Must run on client thread
+                                executor.execute(() -> injectPrice(price));
+
+                                String itemName = (String) data.getOrDefault("item_name", "Item");
+                                String reasoning = (String) data.getOrDefault("reasoning", "");
+                                log.info("Quick price for {}: {} gp ({})", itemName, price, reasoning);
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    log.debug("Error reading quick price response: {}", e.getMessage());
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
+    /**
+     * Parse the configured hotkey string into key code and modifiers.
+     */
+    private int[] parseHotkey(String hotkeyStr) {
+        if (hotkeyStr == null || hotkeyStr.isEmpty()) {
+            return new int[]{KeyEvent.VK_Q, KeyEvent.SHIFT_DOWN_MASK};
+        }
+
+        String[] parts = hotkeyStr.toLowerCase().split("\\s+");
+        int modifiers = 0;
+        int keyCode = KeyEvent.VK_Q;
+
+        for (String part : parts) {
+            switch (part) {
+                case "shift":
+                    modifiers |= KeyEvent.SHIFT_DOWN_MASK;
+                    break;
+                case "ctrl":
+                case "control":
+                    modifiers |= KeyEvent.CTRL_DOWN_MASK;
+                    break;
+                case "alt":
+                    modifiers |= KeyEvent.ALT_DOWN_MASK;
+                    break;
+                default:
+                    if (part.length() == 1) {
+                        keyCode = KeyEvent.getExtendedKeyCodeForChar(part.charAt(0));
+                    }
+                    break;
+            }
+        }
+
+        return new int[]{keyCode, modifiers};
+    }
+
+    /**
+     * Key listener for quick price hotkey.
+     */
+    private class QuickPriceKeyListener implements KeyListener {
+
+        @Override
+        public void keyTyped(KeyEvent e) {
+            // Not used
+        }
+
+        @Override
+        public void keyPressed(KeyEvent e) {
+            if (!config.enableQuickPrice() || !config.enabled()) {
+                return;
+            }
+
+            int[] hotkey = parseHotkey(config.quickPriceHotkey());
+            int expectedKey = hotkey[0];
+            int expectedModifiers = hotkey[1];
+
+            int actualModifiers = e.getModifiersEx() & (
+                KeyEvent.SHIFT_DOWN_MASK |
+                KeyEvent.CTRL_DOWN_MASK |
+                KeyEvent.ALT_DOWN_MASK
+            );
+
+            if (e.getKeyCode() == expectedKey && actualModifiers == expectedModifiers) {
+                if (isPriceChatboxOpen()) {
+                    e.consume();
+                    fetchAndInjectQuickPrice();
+                }
+            }
+        }
+
+        @Override
+        public void keyReleased(KeyEvent e) {
+            // Not used
         }
     }
 }

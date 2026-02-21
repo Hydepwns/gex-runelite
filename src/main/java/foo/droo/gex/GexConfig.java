@@ -137,4 +137,24 @@ public interface GexConfig extends Config {
     default int highValueConfidenceThreshold() {
         return 70;
     }
+
+    @ConfigItem(
+        keyName = "enableQuickPrice",
+        name = "Enable Quick Price",
+        description = "Enable the quick price hotkey feature in the GE price input",
+        position = 14
+    )
+    default boolean enableQuickPrice() {
+        return true;
+    }
+
+    @ConfigItem(
+        keyName = "quickPriceHotkey",
+        name = "Quick Price Hotkey",
+        description = "Hotkey to insert the network-recommended price (use while price chatbox is open)",
+        position = 15
+    )
+    default String quickPriceHotkey() {
+        return "shift Q";
+    }
 }

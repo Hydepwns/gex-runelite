@@ -174,6 +174,26 @@ public class GexApiClient {
     }
 
     /**
+     * Fetches the optimal quick price for an item.
+     */
+    public void fetchQuickPriceAsync(int itemId, String offerType, Callback callback) {
+        String endpoint = buildEndpointUrl(
+            config.apiEndpoint(),
+            "/api/v1/quick-price?item_id=" + itemId + "&offer_type=" + offerType
+        );
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Request request = buildRequest(endpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(callback);
+    }
+
+    /**
      * Fetches fill curves for multiple items in a batch.
      */
     public void fetchFillCurvesBatchAsync(List<Integer> itemIds, Callback callback) {
