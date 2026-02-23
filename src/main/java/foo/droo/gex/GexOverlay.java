@@ -31,6 +31,12 @@ public class GexOverlay extends Overlay {
     private static final Color REGIME_NORMAL_COLOR = new Color(255, 235, 59); // Yellow
     private static final Color REGIME_WIDE_COLOR = new Color(244, 67, 54);    // Red
 
+    // Anomaly warning color
+    private static final Color ANOMALY_WARNING_COLOR = new Color(255, 152, 0); // Orange
+
+    // Optimal window indicator
+    private static final Color OPTIMAL_WINDOW_COLOR = new Color(33, 150, 243); // Blue
+
     private final Client client;
     private final GexConfig config;
 
@@ -112,6 +118,53 @@ public class GexOverlay extends Overlay {
         if (data != null && data.itemId == itemId) {
             renderProfitOverlay(graphics, bounds, data, offer);
             renderEtaOverlay(graphics, bounds, data, offer);
+            renderWarningsOverlay(graphics, bounds, data, offer);
+        }
+    }
+
+    private void renderWarningsOverlay(Graphics2D graphics, Rectangle bounds, SlotData data, GrandExchangeOffer offer) {
+        GrandExchangeOfferState state = offer.getState();
+        if (state != GrandExchangeOfferState.BUYING && state != GrandExchangeOfferState.SELLING) {
+            return;
+        }
+
+        int warningY = bounds.y + 5;
+        int warningX = bounds.x + 5;
+
+        // Anomaly warning (orange "!" icon)
+        if (data.hasAnomalyWarning()) {
+            TextComponent anomalyComp = new TextComponent();
+            anomalyComp.setText("!");
+            anomalyComp.setColor(ANOMALY_WARNING_COLOR);
+            anomalyComp.setPosition(new Point(warningX, warningY));
+            anomalyComp.render(graphics);
+            warningX += 12;
+        }
+
+        // Optimal window indicator (blue dot if in window)
+        if (data.inOptimalWindow) {
+            graphics.setColor(OPTIMAL_WINDOW_COLOR);
+            graphics.fillOval(warningX, warningY - 6, 6, 6);
+            warningX += 10;
+        }
+
+        // Reset countdown warning (red if won't fill before reset)
+        if (data.minutesUntilReset > 0 && data.minutesUntilReset < 240) {
+            String resetText;
+            if (data.minutesUntilReset < 60) {
+                resetText = data.minutesUntilReset + "m";
+            } else {
+                resetText = String.format("%dh%dm", data.minutesUntilReset / 60, data.minutesUntilReset % 60);
+            }
+
+            Color resetColor = data.willFillBeforeReset ? NEUTRAL_COLOR : LOSS_COLOR;
+            String prefix = data.willFillBeforeReset ? "" : "!";
+
+            TextComponent resetComp = new TextComponent();
+            resetComp.setText(prefix + "R:" + resetText);
+            resetComp.setColor(resetColor);
+            resetComp.setPosition(new Point(bounds.x + bounds.width - 55, bounds.y + 5));
+            resetComp.render(graphics);
         }
     }
 
@@ -239,6 +292,16 @@ public class GexOverlay extends Overlay {
             etaSource, spreadRegime, regimeCertainty, hasItemModel, etaBasis));
     }
 
+    public void updateSlotDataFull(int slot, int itemId, long estimatedMargin, double fillEtaMinutes,
+                                   double fillConfidence, String etaSource, String spreadRegime,
+                                   double regimeCertainty, boolean hasItemModel, String etaBasis,
+                                   double anomalyScore, boolean inOptimalWindow,
+                                   int minutesUntilReset, boolean willFillBeforeReset) {
+        slotDataCache.put(slot, new SlotData(itemId, estimatedMargin, fillEtaMinutes, fillConfidence,
+            etaSource, spreadRegime, regimeCertainty, hasItemModel, etaBasis,
+            anomalyScore, inOptimalWindow, minutesUntilReset, willFillBeforeReset));
+    }
+
     public void clearSlotData(int slot) {
         slotDataCache.remove(slot);
     }
@@ -261,13 +324,25 @@ public class GexOverlay extends Overlay {
         final double regimeCertainty;   // 0.0-1.0
         final boolean hasItemModel;     // Per-item ML model available
         final String etaBasis;          // "velocity", "historical", "heuristic"
+        final double anomalyScore;      // 0.0-1.0, warning if > 0.6
+        final boolean inOptimalWindow;  // Currently in optimal trading window
+        final int minutesUntilReset;    // Buy limit reset countdown, -1 if N/A
+        final boolean willFillBeforeReset; // Prediction if fill will complete before reset
 
         SlotData(int itemId, long estimatedMargin, double fillEtaMinutes, double fillConfidence, String etaSource) {
-            this(itemId, estimatedMargin, fillEtaMinutes, fillConfidence, etaSource, null, 0.0, false, null);
+            this(itemId, estimatedMargin, fillEtaMinutes, fillConfidence, etaSource,
+                null, 0.0, false, null, 0.0, false, -1, true);
         }
 
         SlotData(int itemId, long estimatedMargin, double fillEtaMinutes, double fillConfidence, String etaSource,
                  String spreadRegime, double regimeCertainty, boolean hasItemModel, String etaBasis) {
+            this(itemId, estimatedMargin, fillEtaMinutes, fillConfidence, etaSource,
+                spreadRegime, regimeCertainty, hasItemModel, etaBasis, 0.0, false, -1, true);
+        }
+
+        SlotData(int itemId, long estimatedMargin, double fillEtaMinutes, double fillConfidence, String etaSource,
+                 String spreadRegime, double regimeCertainty, boolean hasItemModel, String etaBasis,
+                 double anomalyScore, boolean inOptimalWindow, int minutesUntilReset, boolean willFillBeforeReset) {
             this.itemId = itemId;
             this.estimatedMargin = estimatedMargin;
             this.fillEtaMinutes = fillEtaMinutes;
@@ -277,6 +352,14 @@ public class GexOverlay extends Overlay {
             this.regimeCertainty = regimeCertainty;
             this.hasItemModel = hasItemModel;
             this.etaBasis = etaBasis;
+            this.anomalyScore = anomalyScore;
+            this.inOptimalWindow = inOptimalWindow;
+            this.minutesUntilReset = minutesUntilReset;
+            this.willFillBeforeReset = willFillBeforeReset;
+        }
+
+        boolean hasAnomalyWarning() {
+            return anomalyScore > 0.6;
         }
     }
 }

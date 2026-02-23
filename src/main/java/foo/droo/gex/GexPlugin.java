@@ -104,6 +104,10 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     // Cache for item metadata (name, buy_limit) from predictions
     private final Map<Integer, ItemMetadata> itemMetadataCache = new ConcurrentHashMap<>();
 
+    // Cache for queue estimates (slot index -> estimate data)
+    private final Map<Integer, QueueEstimate> queueEstimateCache = new ConcurrentHashMap<>();
+    private static final long QUEUE_ESTIMATE_CACHE_TTL_MS = 30_000; // 30 seconds
+
     private int eventsSent = 0;
     private volatile boolean connected = false;
 
@@ -201,6 +205,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         itemMlCache.clear();
         pendingMlFetches.clear();
         itemMetadataCache.clear();
+        queueEstimateCache.clear();
     }
 
     @Provides
@@ -313,6 +318,63 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     }
 
     @SuppressWarnings("unchecked")
+    private void fetchQueueEstimates() {
+        if (!config.enabled() || client.getLocalPlayer() == null) {
+            return;
+        }
+
+        String accountHash = Long.toHexString(client.getAccountHash());
+
+        apiClient.fetchSlotsWithEstimatesAsync(accountHash, new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.debug("Failed to fetch queue estimates: {}", e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful() && response.body() != null) {
+                        String body = response.body().string();
+                        Map<String, Object> data = GSON.fromJson(body, Map.class);
+                        if (data != null && data.containsKey("slots")) {
+                            List<?> slots = (List<?>) data.get("slots");
+                            for (Object slotObj : slots) {
+                                if (!(slotObj instanceof Map)) continue;
+                                Map<String, Object> slot = (Map<String, Object>) slotObj;
+
+                                Number indexNum = (Number) slot.get("index");
+                                if (indexNum == null) continue;
+                                int index = indexNum.intValue();
+
+                                Map<String, Object> queueEstimate = (Map<String, Object>) slot.get("queue_estimate");
+                                if (queueEstimate != null) {
+                                    Number etaMins = (Number) queueEstimate.get("estimated_fill_minutes");
+                                    String basis = (String) queueEstimate.get("basis");
+
+                                    // The backend returns remaining_quantity, we estimate reset info
+                                    // For now, use a simple heuristic: if ETA > 180 min, likely won't fill
+                                    double eta = etaMins != null ? etaMins.doubleValue() : 0;
+                                    int minutesUntilReset = 240; // Default 4h window
+                                    boolean willFill = eta < minutesUntilReset;
+
+                                    queueEstimateCache.put(index, new QueueEstimate(
+                                        minutesUntilReset, willFill, 0.0, basis
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error processing queue estimates: {}", e.getMessage());
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
     private void fetchMarketRegime() {
         if (!config.enabled()) {
             return;
@@ -374,16 +436,45 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                         if (wrapper != null && wrapper.containsKey("data")) {
                             Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
 
+                            // Parse spread regime
                             Map<String, Object> regimeData = (Map<String, Object>) data.get("spread_regime");
                             String regime = regimeData != null ? (String) regimeData.get("regime") : null;
                             double certainty = regimeData != null ?
                                 ((Number) regimeData.getOrDefault("certainty", 0.0)).doubleValue() : 0.0;
 
+                            // Parse per-item model availability
                             Map<String, Object> modelData = (Map<String, Object>) data.get("per_item_model");
                             boolean hasItemModel = modelData != null &&
                                 Boolean.TRUE.equals(modelData.get("available"));
 
-                            itemMlCache.put(itemId, new ItemMlData(regime, certainty, hasItemModel));
+                            // Parse anomaly score
+                            Number anomalyNum = (Number) data.get("anomaly_score");
+                            double anomalyScore = anomalyNum != null ? anomalyNum.doubleValue() : 0.0;
+
+                            // Parse optimal trading hours
+                            int buyStart = -1, buyEnd = -1, sellStart = -1, sellEnd = -1;
+                            Map<String, Object> tradingHours = (Map<String, Object>) data.get("optimal_trading_hours");
+                            if (tradingHours != null) {
+                                Map<String, Object> buyWindow = (Map<String, Object>) tradingHours.get("buy_window");
+                                if (buyWindow != null) {
+                                    Number start = (Number) buyWindow.get("start");
+                                    Number end = (Number) buyWindow.get("end");
+                                    if (start != null) buyStart = start.intValue();
+                                    if (end != null) buyEnd = end.intValue();
+                                }
+                                Map<String, Object> sellWindow = (Map<String, Object>) tradingHours.get("sell_window");
+                                if (sellWindow != null) {
+                                    Number start = (Number) sellWindow.get("start");
+                                    Number end = (Number) sellWindow.get("end");
+                                    if (start != null) sellStart = start.intValue();
+                                    if (end != null) sellEnd = end.intValue();
+                                }
+                            }
+
+                            itemMlCache.put(itemId, new ItemMlData(
+                                regime, certainty, hasItemModel, anomalyScore,
+                                buyStart, buyEnd, sellStart, sellEnd
+                            ));
 
                             // Cache item metadata if present
                             String itemName = (String) data.get("item_name");
@@ -425,6 +516,9 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         }
 
         String accountHash = Long.toHexString(client.getAccountHash());
+
+        // Also fetch queue estimates
+        fetchQueueEstimates();
 
         apiClient.fetchPredictionsAsync(itemIds, accountHash, new Callback() {
             @Override
@@ -536,11 +630,28 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                     String spreadRegime = mlData != null ? mlData.spreadRegime : null;
                     double regimeCertainty = mlData != null ? mlData.regimeCertainty : 0.0;
                     boolean hasItemModel = mlData != null && mlData.hasItemModel;
+                    double anomalyScore = mlData != null ? mlData.anomalyScore : 0.0;
+
+                    // Check if in optimal trading window
+                    int currentHourUtc = LocalDateTime.now(ZoneOffset.UTC).getHour();
+                    boolean isBuying = offer.getState() == GrandExchangeOfferState.BUYING;
+                    boolean inOptimalWindow = false;
+                    if (mlData != null) {
+                        inOptimalWindow = isBuying ?
+                            mlData.isInOptimalBuyWindow(currentHourUtc) :
+                            mlData.isInOptimalSellWindow(currentHourUtc);
+                    }
+
+                    // Get queue estimate data
+                    QueueEstimate queueEst = queueEstimateCache.get(i);
+                    int minutesUntilReset = queueEst != null ? queueEst.minutesUntilReset : -1;
+                    boolean willFillBeforeReset = queueEst != null ? queueEst.willFillBeforeReset : true;
 
                     // Determine ETA basis (velocity > historical > heuristic)
-                    String etaBasis = etaDayOfWeek > 0 ? "velocity" : "historical";
+                    String etaBasis = etaDayOfWeek > 0 ? "velocity" :
+                        (queueEst != null && queueEst.basis != null ? queueEst.basis : "historical");
 
-                    overlay.updateSlotDataWithMl(
+                    overlay.updateSlotDataFull(
                         i,
                         itemId,
                         margin.longValue(),
@@ -550,7 +661,11 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                         spreadRegime,
                         regimeCertainty,
                         hasItemModel,
-                        etaBasis
+                        etaBasis,
+                        anomalyScore,
+                        inOptimalWindow,
+                        minutesUntilReset,
+                        willFillBeforeReset
                     );
 
                     // Stall notification
@@ -967,17 +1082,52 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         final String spreadRegime;
         final double regimeCertainty;
         final boolean hasItemModel;
+        final double anomalyScore;
+        final int buyWindowStart;  // Hour UTC, -1 if not available
+        final int buyWindowEnd;
+        final int sellWindowStart;
+        final int sellWindowEnd;
         final long cachedAt;
 
-        ItemMlData(String spreadRegime, double regimeCertainty, boolean hasItemModel) {
+        ItemMlData(String spreadRegime, double regimeCertainty, boolean hasItemModel,
+                   double anomalyScore, int buyWindowStart, int buyWindowEnd,
+                   int sellWindowStart, int sellWindowEnd) {
             this.spreadRegime = spreadRegime;
             this.regimeCertainty = regimeCertainty;
             this.hasItemModel = hasItemModel;
+            this.anomalyScore = anomalyScore;
+            this.buyWindowStart = buyWindowStart;
+            this.buyWindowEnd = buyWindowEnd;
+            this.sellWindowStart = sellWindowStart;
+            this.sellWindowEnd = sellWindowEnd;
             this.cachedAt = System.currentTimeMillis();
         }
 
         boolean isExpired() {
             return System.currentTimeMillis() - cachedAt > ITEM_ML_CACHE_TTL_MS;
+        }
+
+        boolean hasAnomalyWarning() {
+            return anomalyScore > 0.6;
+        }
+
+        boolean isInOptimalBuyWindow(int currentHourUtc) {
+            if (buyWindowStart < 0) return false;
+            if (buyWindowStart <= buyWindowEnd) {
+                return currentHourUtc >= buyWindowStart && currentHourUtc <= buyWindowEnd;
+            } else {
+                // Window wraps around midnight
+                return currentHourUtc >= buyWindowStart || currentHourUtc <= buyWindowEnd;
+            }
+        }
+
+        boolean isInOptimalSellWindow(int currentHourUtc) {
+            if (sellWindowStart < 0) return false;
+            if (sellWindowStart <= sellWindowEnd) {
+                return currentHourUtc >= sellWindowStart && currentHourUtc <= sellWindowEnd;
+            } else {
+                return currentHourUtc >= sellWindowStart || currentHourUtc <= sellWindowEnd;
+            }
         }
     }
 
@@ -991,6 +1141,29 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         ItemMetadata(String name, int buyLimit) {
             this.name = name;
             this.buyLimit = buyLimit;
+        }
+    }
+
+    /**
+     * Cached queue estimate for a slot.
+     */
+    private static class QueueEstimate {
+        final int minutesUntilReset;
+        final boolean willFillBeforeReset;
+        final double fillProbability;
+        final String basis;  // "velocity", "historical", "heuristic"
+        final long cachedAt;
+
+        QueueEstimate(int minutesUntilReset, boolean willFillBeforeReset, double fillProbability, String basis) {
+            this.minutesUntilReset = minutesUntilReset;
+            this.willFillBeforeReset = willFillBeforeReset;
+            this.fillProbability = fillProbability;
+            this.basis = basis;
+            this.cachedAt = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - cachedAt > QUEUE_ESTIMATE_CACHE_TTL_MS;
         }
     }
 
