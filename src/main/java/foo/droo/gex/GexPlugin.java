@@ -92,6 +92,11 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     private ScheduledFuture<?> heartbeatTask;
     private ScheduledFuture<?> batchTask;
     private ScheduledFuture<?> dataFetchTask;
+    private ScheduledFuture<?> marketRegimeTask;
+
+    // Cache for per-item ML data (itemId -> ML data)
+    private final Map<Integer, ItemMlData> itemMlCache = new ConcurrentHashMap<>();
+    private static final long ITEM_ML_CACHE_TTL_MS = 300_000; // 5 minutes
 
     private int eventsSent = 0;
     private volatile boolean connected = false;
@@ -153,6 +158,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         scheduleHeartbeat();
         scheduleBatchSend();
         scheduleDataFetch();
+        scheduleMarketRegimeFetch();
     }
 
     @Override
@@ -175,6 +181,10 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             dataFetchTask.cancel(false);
             dataFetchTask = null;
         }
+        if (marketRegimeTask != null) {
+            marketRegimeTask.cancel(false);
+            marketRegimeTask = null;
+        }
         // Flush remaining events before shutdown
         flushBatch();
 
@@ -182,6 +192,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         stallNotifiedSlots.clear();
         highValueCooldowns.clear();
         lastHeartbeatStates.clear();
+        itemMlCache.clear();
     }
 
     @Provides
@@ -277,6 +288,97 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             30000,
             TimeUnit.MILLISECONDS
         );
+    }
+
+    private void scheduleMarketRegimeFetch() {
+        if (marketRegimeTask != null) {
+            marketRegimeTask.cancel(false);
+        }
+
+        // Fetch market regime every 60 seconds
+        marketRegimeTask = executor.scheduleAtFixedRate(
+            this::fetchMarketRegime,
+            10000,
+            60000,
+            TimeUnit.MILLISECONDS
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fetchMarketRegime() {
+        if (!config.enabled()) {
+            return;
+        }
+
+        apiClient.fetchMarketRegimeAsync(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.debug("Failed to fetch market regime: {}", e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful() && response.body() != null) {
+                        String body = response.body().string();
+                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        if (wrapper != null && wrapper.containsKey("data")) {
+                            Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
+                            String riskLevel = (String) data.get("risk_level");
+                            String dominantRegime = (String) data.get("dominant_regime");
+                            panel.updateMarketRisk(riskLevel, dominantRegime);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error processing market regime: {}", e.getMessage());
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fetchItemMlData(int itemId) {
+        ItemMlData cached = itemMlCache.get(itemId);
+        if (cached != null && !cached.isExpired()) {
+            return;
+        }
+
+        apiClient.fetchItemMlDataAsync(itemId, new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.debug("Failed to fetch ML data for item {}: {}", itemId, e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful() && response.body() != null) {
+                        String body = response.body().string();
+                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        if (wrapper != null && wrapper.containsKey("data")) {
+                            Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
+
+                            Map<String, Object> regimeData = (Map<String, Object>) data.get("spread_regime");
+                            String regime = regimeData != null ? (String) regimeData.get("regime") : null;
+                            double certainty = regimeData != null ?
+                                ((Number) regimeData.getOrDefault("certainty", 0.0)).doubleValue() : 0.0;
+
+                            Map<String, Object> modelData = (Map<String, Object>) data.get("per_item_model");
+                            boolean hasItemModel = modelData != null &&
+                                Boolean.TRUE.equals(modelData.get("available"));
+
+                            itemMlCache.put(itemId, new ItemMlData(regime, certainty, hasItemModel));
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error processing ML data for item {}: {}", itemId, e.getMessage());
+                } finally {
+                    response.close();
+                }
+            }
+        });
     }
 
     private void fetchSlotData() {
@@ -378,7 +480,12 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                     continue;
                 }
 
-                Map<String, Object> pred = predictionsByItemId.get(offer.getItemId());
+                int itemId = offer.getItemId();
+
+                // Fetch ML data for this item if not cached
+                fetchItemMlData(itemId);
+
+                Map<String, Object> pred = predictionsByItemId.get(itemId);
                 if (pred != null) {
                     Number margin = (Number) pred.getOrDefault("estimated_margin", 0);
                     Number eta = (Number) pred.getOrDefault("fill_eta_minutes", 0);
@@ -386,19 +493,32 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
                     // Resolve day-aware ETA
                     double[] etaResult = resolveDayAwareEta(
-                            offer.getItemId(), eta.doubleValue(),
+                            itemId, eta.doubleValue(),
                             fillCurveCache, config.showDayAwareEta());
                     double resolvedEta = etaResult[0];
                     int etaDayOfWeek = (int) etaResult[1];
                     String etaSource = etaDayOfWeek > 0 ? dayAbbreviation(etaDayOfWeek) : null;
 
-                    overlay.updateSlotData(
+                    // Get cached ML data
+                    ItemMlData mlData = itemMlCache.get(itemId);
+                    String spreadRegime = mlData != null ? mlData.spreadRegime : null;
+                    double regimeCertainty = mlData != null ? mlData.regimeCertainty : 0.0;
+                    boolean hasItemModel = mlData != null && mlData.hasItemModel;
+
+                    // Determine ETA basis (velocity > historical > heuristic)
+                    String etaBasis = etaDayOfWeek > 0 ? "velocity" : "historical";
+
+                    overlay.updateSlotDataWithMl(
                         i,
-                        offer.getItemId(),
+                        itemId,
                         margin.longValue(),
                         resolvedEta,
                         confidence.doubleValue(),
-                        etaSource
+                        etaSource,
+                        spreadRegime,
+                        regimeCertainty,
+                        hasItemModel,
+                        etaBasis
                     );
 
                     // Stall notification
@@ -795,6 +915,27 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
     static boolean shouldNotifyHighValue(long margin, double confidence, int marginThreshold, int confidenceThreshold) {
         return margin >= marginThreshold && confidence >= confidenceThreshold;
+    }
+
+    /**
+     * Cached ML data for an item.
+     */
+    private static class ItemMlData {
+        final String spreadRegime;
+        final double regimeCertainty;
+        final boolean hasItemModel;
+        final long cachedAt;
+
+        ItemMlData(String spreadRegime, double regimeCertainty, boolean hasItemModel) {
+            this.spreadRegime = spreadRegime;
+            this.regimeCertainty = regimeCertainty;
+            this.hasItemModel = hasItemModel;
+            this.cachedAt = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - cachedAt > ITEM_ML_CACHE_TTL_MS;
+        }
     }
 
     private void sendBatch(List<Map<String, Object>> batch) {

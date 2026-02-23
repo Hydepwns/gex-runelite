@@ -26,6 +26,11 @@ public class GexOverlay extends Overlay {
     private static final Color DISCONNECTED_COLOR = new Color(244, 67, 54);
     private static final int STATUS_DOT_SIZE = 8;
 
+    // Regime colors: tight = fast fills, wide = slow/risky
+    private static final Color REGIME_TIGHT_COLOR = new Color(76, 175, 80);   // Green
+    private static final Color REGIME_NORMAL_COLOR = new Color(255, 235, 59); // Yellow
+    private static final Color REGIME_WIDE_COLOR = new Color(244, 67, 54);    // Red
+
     private final Client client;
     private final GexConfig config;
 
@@ -146,14 +151,53 @@ public class GexOverlay extends Overlay {
         int pct = (int) (data.fillConfidence * 100);
         String dayHint = data.etaSource != null ? " (" + data.etaSource + ")" : "";
 
-        // Color ETA by confidence: green >70%, yellow 40-70%, red <40%
-        Color etaColor = pct >= 70 ? PROFIT_COLOR : (pct >= 40 ? NEUTRAL_COLOR : LOSS_COLOR);
+        // Color ETA by spread regime if available, otherwise by confidence
+        Color etaColor;
+        if (data.spreadRegime != null) {
+            etaColor = getRegimeColor(data.spreadRegime);
+        } else {
+            etaColor = pct >= 70 ? PROFIT_COLOR : (pct >= 40 ? NEUTRAL_COLOR : LOSS_COLOR);
+        }
+
+        // Build ETA text with optional ML indicator
+        String mlIndicator = data.hasItemModel ? " [ML]" : "";
+        String basisHint = data.etaBasis != null ? " " + data.etaBasis.substring(0, 1).toUpperCase() : "";
 
         TextComponent etaComp = new TextComponent();
-        etaComp.setText("~" + etaText + " " + pct + "%" + dayHint);
+        etaComp.setText("~" + etaText + " " + pct + "%" + dayHint + basisHint + mlIndicator);
         etaComp.setColor(etaColor);
         etaComp.setPosition(new Point(bounds.x + 5, bounds.y + bounds.height - 15));
         etaComp.render(graphics);
+
+        // Render regime indicator dot
+        if (data.spreadRegime != null) {
+            renderRegimeIndicator(graphics, bounds, data.spreadRegime);
+        }
+    }
+
+    private void renderRegimeIndicator(Graphics2D graphics, Rectangle bounds, String regime) {
+        // Small colored dot in the bottom-right of the slot to indicate regime
+        int dotSize = 6;
+        int x = bounds.x + bounds.width - dotSize - 5;
+        int y = bounds.y + bounds.height - dotSize - 5;
+
+        graphics.setColor(getRegimeColor(regime));
+        graphics.fillOval(x, y, dotSize, dotSize);
+    }
+
+    private Color getRegimeColor(String regime) {
+        if (regime == null) {
+            return NEUTRAL_COLOR;
+        }
+        switch (regime.toLowerCase()) {
+            case "tight":
+                return REGIME_TIGHT_COLOR;
+            case "wide":
+                return REGIME_WIDE_COLOR;
+            case "normal":
+            default:
+                return REGIME_NORMAL_COLOR;
+        }
     }
 
     private Widget getSlotWidget(int slot) {
@@ -188,6 +232,13 @@ public class GexOverlay extends Overlay {
         slotDataCache.put(slot, new SlotData(itemId, estimatedMargin, fillEtaMinutes, fillConfidence, etaSource));
     }
 
+    public void updateSlotDataWithMl(int slot, int itemId, long estimatedMargin, double fillEtaMinutes,
+                                      double fillConfidence, String etaSource, String spreadRegime,
+                                      double regimeCertainty, boolean hasItemModel, String etaBasis) {
+        slotDataCache.put(slot, new SlotData(itemId, estimatedMargin, fillEtaMinutes, fillConfidence,
+            etaSource, spreadRegime, regimeCertainty, hasItemModel, etaBasis));
+    }
+
     public void clearSlotData(int slot) {
         slotDataCache.remove(slot);
     }
@@ -206,13 +257,26 @@ public class GexOverlay extends Overlay {
         final double fillEtaMinutes;
         final double fillConfidence;
         final String etaSource;
+        final String spreadRegime;      // "tight", "normal", "wide"
+        final double regimeCertainty;   // 0.0-1.0
+        final boolean hasItemModel;     // Per-item ML model available
+        final String etaBasis;          // "velocity", "historical", "heuristic"
 
         SlotData(int itemId, long estimatedMargin, double fillEtaMinutes, double fillConfidence, String etaSource) {
+            this(itemId, estimatedMargin, fillEtaMinutes, fillConfidence, etaSource, null, 0.0, false, null);
+        }
+
+        SlotData(int itemId, long estimatedMargin, double fillEtaMinutes, double fillConfidence, String etaSource,
+                 String spreadRegime, double regimeCertainty, boolean hasItemModel, String etaBasis) {
             this.itemId = itemId;
             this.estimatedMargin = estimatedMargin;
             this.fillEtaMinutes = fillEtaMinutes;
             this.fillConfidence = fillConfidence;
             this.etaSource = etaSource;
+            this.spreadRegime = spreadRegime;
+            this.regimeCertainty = regimeCertainty;
+            this.hasItemModel = hasItemModel;
+            this.etaBasis = etaBasis;
         }
     }
 }

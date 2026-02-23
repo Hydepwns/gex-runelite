@@ -14,9 +14,15 @@ import java.util.Map;
 @Slf4j
 public class GexPanel extends PluginPanel {
 
+    private static final Color RISK_LOW_COLOR = new Color(76, 175, 80);
+    private static final Color RISK_MEDIUM_COLOR = new Color(255, 235, 59);
+    private static final Color RISK_HIGH_COLOR = new Color(244, 67, 54);
+
     private final JPanel historyPanel;
     private final JPanel statsPanel;
     private final JLabel statusLabel;
+    private final JLabel riskLabel;
+    private final JPanel riskPanel;
 
     public GexPanel() {
         setLayout(new BorderLayout());
@@ -32,10 +38,24 @@ public class GexPanel extends PluginPanel {
         titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD, 16f));
         headerPanel.add(titleLabel, BorderLayout.WEST);
 
+        // Right side: risk indicator + status
+        JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
+        rightPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
+
+        riskPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+        riskPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        riskLabel = new JLabel("");
+        riskLabel.setFont(riskLabel.getFont().deriveFont(Font.BOLD, 9f));
+        riskPanel.add(riskLabel);
+        riskPanel.setVisible(false);
+
         statusLabel = new JLabel("Disconnected");
         statusLabel.setForeground(new Color(244, 67, 54));
         statusLabel.setFont(statusLabel.getFont().deriveFont(10f));
-        headerPanel.add(statusLabel, BorderLayout.EAST);
+
+        rightPanel.add(riskPanel);
+        rightPanel.add(statusLabel);
+        headerPanel.add(rightPanel, BorderLayout.EAST);
 
         add(headerPanel, BorderLayout.NORTH);
 
@@ -181,6 +201,43 @@ public class GexPanel extends PluginPanel {
             statusLabel.setForeground(
                 "Connected".equals(status) ? new Color(76, 175, 80) : new Color(244, 67, 54)
             );
+        });
+    }
+
+    /**
+     * Update the market risk indicator.
+     * @param riskLevel "low", "medium", or "high"
+     * @param dominantRegime "tight", "normal", or "wide"
+     */
+    public void updateMarketRisk(String riskLevel, String dominantRegime) {
+        SwingUtilities.invokeLater(() -> {
+            if (riskLevel == null || riskLevel.isEmpty()) {
+                riskPanel.setVisible(false);
+                return;
+            }
+
+            Color riskColor;
+            String riskText;
+            switch (riskLevel.toLowerCase()) {
+                case "high":
+                    riskColor = RISK_HIGH_COLOR;
+                    riskText = "HIGH";
+                    break;
+                case "medium":
+                    riskColor = RISK_MEDIUM_COLOR;
+                    riskText = "MED";
+                    break;
+                case "low":
+                default:
+                    riskColor = RISK_LOW_COLOR;
+                    riskText = "LOW";
+                    break;
+            }
+
+            String regimeHint = dominantRegime != null ? " " + dominantRegime.substring(0, 1).toUpperCase() : "";
+            riskLabel.setText(riskText + regimeHint);
+            riskLabel.setForeground(riskColor);
+            riskPanel.setVisible(true);
         });
     }
 }

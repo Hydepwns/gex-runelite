@@ -194,6 +194,57 @@ public class GexApiClient {
     }
 
     /**
+     * Fetches slot data with queue estimates for an account.
+     */
+    public void fetchSlotsWithEstimatesAsync(String accountHash, Callback callback) {
+        String endpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/slots/" + accountHash);
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Request request = buildRequest(endpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(callback);
+    }
+
+    /**
+     * Fetches ML data for an item (regime, anomaly, fill probability).
+     */
+    public void fetchItemMlDataAsync(int itemId, Callback callback) {
+        String endpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/items/" + itemId + "/ml");
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Request request = buildRequest(endpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(callback);
+    }
+
+    /**
+     * Fetches market-wide regime and risk data.
+     */
+    public void fetchMarketRegimeAsync(Callback callback) {
+        String endpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/market/regime");
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Request request = buildRequest(endpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(callback);
+    }
+
+    /**
      * Fetches fill curves for multiple items in a batch.
      */
     public void fetchFillCurvesBatchAsync(List<Integer> itemIds, Callback callback) {
