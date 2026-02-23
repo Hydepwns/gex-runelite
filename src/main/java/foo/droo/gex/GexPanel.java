@@ -198,9 +198,15 @@ public class GexPanel extends PluginPanel {
     public void setStatus(String status) {
         SwingUtilities.invokeLater(() -> {
             statusLabel.setText(status);
-            statusLabel.setForeground(
-                "Connected".equals(status) ? new Color(76, 175, 80) : new Color(244, 67, 54)
-            );
+            Color statusColor;
+            if ("Connected".equals(status)) {
+                statusColor = new Color(76, 175, 80); // Green
+            } else if (status != null && status.startsWith("Rate")) {
+                statusColor = new Color(255, 152, 0); // Orange for rate limited
+            } else {
+                statusColor = new Color(244, 67, 54); // Red for disconnected
+            }
+            statusLabel.setForeground(statusColor);
         });
     }
 

@@ -139,9 +139,26 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     protected void startUp() {
         log.info("GEX plugin started");
 
+        // Validate endpoint URL
+        String endpointError = GexApiClient.validateEndpointUrl(config.apiEndpoint());
+        if (endpointError != null) {
+            log.error("GEX: Invalid API endpoint configuration: {}", endpointError);
+            notifier.notify("GEX: Invalid API endpoint - " + endpointError);
+        }
+
         // Set up API client
         apiClient = new GexApiClient(httpClient, executor, config);
         apiClient.setConnectionListener(this);
+
+        // Perform health check on startup
+        apiClient.healthCheckAsync((healthy, message) -> {
+            if (healthy) {
+                log.info("GEX: {}", message);
+            } else {
+                log.warn("GEX: Health check failed - {}", message);
+                // Don't notify on startup failure - user will see disconnected status
+            }
+        });
 
         // Set up panel
         panel = new GexPanel();
@@ -1210,7 +1227,15 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     private void setConnected(boolean status) {
         boolean wasDisconnected = !connected;
         connected = status;
-        panel.setStatus(status ? "Connected" : "Disconnected");
+
+        // Check if rate limited
+        if (apiClient != null && apiClient.isRateLimited()) {
+            long remainingSec = apiClient.getRateLimitRemainingMs() / 1000;
+            panel.setStatus("Rate limited " + remainingSec + "s");
+        } else {
+            panel.setStatus(status ? "Connected" : "Disconnected");
+        }
+
         overlay.setConnected(status);
 
         // Reset eviction tracking when connection restored

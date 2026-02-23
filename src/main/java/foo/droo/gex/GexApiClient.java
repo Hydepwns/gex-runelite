@@ -38,6 +38,12 @@ public class GexApiClient {
     private static final int READ_TIMEOUT_SECONDS = 10;
     private static final int WRITE_TIMEOUT_SECONDS = 10;
 
+    // Rate limiting
+    private static final long DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000; // 1 minute default
+    private static final long MAX_RATE_LIMIT_COOLDOWN_MS = 300_000;    // 5 minutes max
+    private volatile long rateLimitedUntil = 0;
+    private volatile long currentCooldownMs = DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+
     private final OkHttpClient httpClient;
     private final ScheduledExecutorService executor;
     private final GexConfig config;
@@ -64,9 +70,61 @@ public class GexApiClient {
     }
 
     /**
+     * Check if we're currently rate limited.
+     */
+    public boolean isRateLimited() {
+        return System.currentTimeMillis() < rateLimitedUntil;
+    }
+
+    /**
+     * Get remaining rate limit cooldown in milliseconds.
+     */
+    public long getRateLimitRemainingMs() {
+        long remaining = rateLimitedUntil - System.currentTimeMillis();
+        return Math.max(0, remaining);
+    }
+
+    /**
+     * Handle a 429 rate limit response.
+     * Parses Retry-After header if present, otherwise uses exponential backoff.
+     */
+    private void handleRateLimit(Response response) {
+        String retryAfter = response.header("Retry-After");
+        long cooldownMs;
+
+        if (retryAfter != null) {
+            try {
+                // Retry-After can be seconds
+                cooldownMs = Long.parseLong(retryAfter) * 1000;
+            } catch (NumberFormatException e) {
+                cooldownMs = currentCooldownMs;
+            }
+        } else {
+            // Exponential backoff
+            cooldownMs = currentCooldownMs;
+            currentCooldownMs = Math.min(currentCooldownMs * 2, MAX_RATE_LIMIT_COOLDOWN_MS);
+        }
+
+        rateLimitedUntil = System.currentTimeMillis() + cooldownMs;
+        log.warn("Rate limited by server, backing off for {}s", cooldownMs / 1000);
+    }
+
+    /**
+     * Reset rate limit cooldown after successful request.
+     */
+    private void resetRateLimitCooldown() {
+        currentCooldownMs = DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+    }
+
+    /**
      * Sends a batch of events to the API with gzip compression and retry logic.
      */
     public void sendBatchAsync(List<Map<String, Object>> batch, Callback callback) {
+        if (isRateLimited()) {
+            log.debug("Skipping batch send - rate limited for {}s more", getRateLimitRemainingMs() / 1000);
+            callback.onFailure(null, new IOException("Rate limited"));
+            return;
+        }
         sendBatchWithRetry(batch, 0, callback);
     }
 
@@ -104,7 +162,12 @@ public class GexApiClient {
                 try {
                     if (!response.isSuccessful()) {
                         int code = response.code();
-                        if (code >= 500 && code < 600) {
+                        if (code == 429) {
+                            // Rate limited - back off
+                            handleRateLimit(response);
+                            notifyConnectionStatus(true); // Server is up, just rate limited
+                            callback.onFailure(call, new IOException("Rate limited"));
+                        } else if (code >= 500 && code < 600) {
                             notifyConnectionStatus(false);
                             retryBatch(batch, attempt, callback);
                         } else {
@@ -118,6 +181,7 @@ public class GexApiClient {
                         }
                     } else {
                         notifyConnectionStatus(true);
+                        resetRateLimitCooldown();
                         try {
                             callback.onResponse(call, response);
                         } catch (IOException e) {
@@ -146,6 +210,12 @@ public class GexApiClient {
      * Fetches predictions for the given item IDs.
      */
     public void fetchPredictionsAsync(List<Integer> itemIds, String accountHash, Callback callback) {
+        if (isRateLimited()) {
+            log.debug("Skipping predictions fetch - rate limited");
+            callback.onFailure(null, new IOException("Rate limited"));
+            return;
+        }
+
         String predictEndpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/predict");
         if (predictEndpoint == null) {
             callback.onFailure(null, new IOException("Invalid endpoint configuration"));
@@ -162,7 +232,7 @@ public class GexApiClient {
             .post(RequestBody.create(JSON, json))
             .build();
 
-        httpClient.newCall(request).enqueue(callback);
+        httpClient.newCall(request).enqueue(wrapCallbackWithRateLimitHandling(callback));
     }
 
     /**
@@ -340,5 +410,95 @@ public class GexApiClient {
         if (connectionListener != null) {
             connectionListener.onConnectionStatusChanged(connected);
         }
+    }
+
+    /**
+     * Wraps a callback to handle rate limit responses.
+     */
+    private Callback wrapCallbackWithRateLimitHandling(Callback original) {
+        return new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                original.onFailure(call, e);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                if (response.code() == 429) {
+                    handleRateLimit(response);
+                    response.close();
+                    original.onFailure(call, new IOException("Rate limited"));
+                } else if (response.isSuccessful()) {
+                    resetRateLimitCooldown();
+                    original.onResponse(call, response);
+                } else {
+                    original.onResponse(call, response);
+                }
+            }
+        };
+    }
+
+    /**
+     * Validates the API endpoint URL format.
+     * @return null if valid, error message if invalid
+     */
+    public static String validateEndpointUrl(String endpoint) {
+        if (endpoint == null || endpoint.trim().isEmpty()) {
+            return "Endpoint URL is empty";
+        }
+
+        try {
+            URL url = new URL(endpoint);
+            String protocol = url.getProtocol();
+            if (!protocol.equals("http") && !protocol.equals("https")) {
+                return "Endpoint must use http or https protocol";
+            }
+            if (url.getHost() == null || url.getHost().isEmpty()) {
+                return "Endpoint has no host";
+            }
+            return null; // Valid
+        } catch (MalformedURLException e) {
+            return "Invalid URL format: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Performs a health check against the API endpoint.
+     * Calls the callback with success=true if healthy, false otherwise.
+     */
+    public void healthCheckAsync(HealthCheckCallback callback) {
+        String healthEndpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/health");
+        if (healthEndpoint == null) {
+            callback.onResult(false, "Invalid endpoint configuration");
+            return;
+        }
+
+        Request request = buildRequest(healthEndpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                callback.onResult(false, "Connection failed: " + e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful()) {
+                        callback.onResult(true, "Connected to " + config.apiEndpoint());
+                    } else {
+                        callback.onResult(false, "Server returned " + response.code());
+                    }
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
+    public interface HealthCheckCallback {
+        void onResult(boolean healthy, String message);
     }
 }
