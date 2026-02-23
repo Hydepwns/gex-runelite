@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class FillCurveCache {
 
     private static final Gson GSON = GexApiClient.getGson();
-    private static final long DEFAULT_TTL_MS = 300_000; // 5 minutes
+    private static final long DEFAULT_TTL_MS = 180_000; // 3 minutes (reduced for fresher regime data)
 
     private final Map<Integer, FillCurveEntry> cache = new ConcurrentHashMap<>();
     private final long ttlMs;

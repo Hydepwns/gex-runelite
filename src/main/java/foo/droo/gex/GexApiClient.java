@@ -17,6 +17,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.GZIPOutputStream;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
+
 /**
  * HTTP client for GEX API communication.
  * Handles request building, gzip compression, retry logic, and endpoint construction.
@@ -31,6 +33,11 @@ public class GexApiClient {
     private static final int MAX_RETRY_ATTEMPTS = 4;
     private static final int[] RETRY_DELAYS_MS = {1000, 2000, 4000, 8000};
 
+    // Explicit timeouts to prevent hanging on unresponsive server
+    private static final int CONNECT_TIMEOUT_SECONDS = 5;
+    private static final int READ_TIMEOUT_SECONDS = 10;
+    private static final int WRITE_TIMEOUT_SECONDS = 10;
+
     private final OkHttpClient httpClient;
     private final ScheduledExecutorService executor;
     private final GexConfig config;
@@ -42,7 +49,12 @@ public class GexApiClient {
     private ConnectionListener connectionListener;
 
     public GexApiClient(OkHttpClient httpClient, ScheduledExecutorService executor, GexConfig config) {
-        this.httpClient = httpClient;
+        // Configure client with explicit timeouts
+        this.httpClient = httpClient.newBuilder()
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, SECONDS)
+            .readTimeout(READ_TIMEOUT_SECONDS, SECONDS)
+            .writeTimeout(WRITE_TIMEOUT_SECONDS, SECONDS)
+            .build();
         this.executor = executor;
         this.config = config;
     }

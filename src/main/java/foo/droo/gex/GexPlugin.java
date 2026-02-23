@@ -98,6 +98,12 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     private final Map<Integer, ItemMlData> itemMlCache = new ConcurrentHashMap<>();
     private static final long ITEM_ML_CACHE_TTL_MS = 300_000; // 5 minutes
 
+    // Track pending ML data fetches to avoid duplicate requests
+    private final Set<Integer> pendingMlFetches = ConcurrentHashMap.newKeySet();
+
+    // Cache for item metadata (name, buy_limit) from predictions
+    private final Map<Integer, ItemMetadata> itemMetadataCache = new ConcurrentHashMap<>();
+
     private int eventsSent = 0;
     private volatile boolean connected = false;
 
@@ -193,6 +199,8 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         highValueCooldowns.clear();
         lastHeartbeatStates.clear();
         itemMlCache.clear();
+        pendingMlFetches.clear();
+        itemMetadataCache.clear();
     }
 
     @Provides
@@ -345,9 +353,15 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             return;
         }
 
+        // Avoid duplicate in-flight requests
+        if (!pendingMlFetches.add(itemId)) {
+            return;
+        }
+
         apiClient.fetchItemMlDataAsync(itemId, new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
+                pendingMlFetches.remove(itemId);
                 log.debug("Failed to fetch ML data for item {}: {}", itemId, e.getMessage());
             }
 
@@ -370,11 +384,18 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                                 Boolean.TRUE.equals(modelData.get("available"));
 
                             itemMlCache.put(itemId, new ItemMlData(regime, certainty, hasItemModel));
+
+                            // Cache item metadata if present
+                            String itemName = (String) data.get("item_name");
+                            if (itemName != null) {
+                                itemMetadataCache.put(itemId, new ItemMetadata(itemName, 0));
+                            }
                         }
                     }
                 } catch (Exception e) {
                     log.debug("Error processing ML data for item {}: {}", itemId, e.getMessage());
                 } finally {
+                    pendingMlFetches.remove(itemId);
                     response.close();
                 }
             }
@@ -454,7 +475,18 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 Map<String, Object> pred = (Map<String, Object>) predObj;
                 Object itemIdObj = pred.get("item_id");
                 if (itemIdObj instanceof Number) {
-                    predictionsByItemId.put(((Number) itemIdObj).intValue(), pred);
+                    int itemId = ((Number) itemIdObj).intValue();
+                    predictionsByItemId.put(itemId, pred);
+
+                    // Cache item metadata from predictions to avoid N+1 lookups
+                    String itemName = (String) pred.get("item_name");
+                    Number buyLimit = (Number) pred.get("buy_limit");
+                    if (itemName != null) {
+                        itemMetadataCache.put(itemId, new ItemMetadata(
+                            itemName,
+                            buyLimit != null ? buyLimit.intValue() : 0
+                        ));
+                    }
                 }
             }
 
@@ -774,8 +806,19 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         }
     }
 
+    /**
+     * Get item name from cache, falling back to itemManager.
+     */
+    private String getItemName(int itemId) {
+        ItemMetadata cached = itemMetadataCache.get(itemId);
+        if (cached != null && cached.name != null) {
+            return cached.name;
+        }
+        return itemManager.getItemComposition(itemId).getName();
+    }
+
     private void notifyFillCompletion(int slot, GrandExchangeOffer offer) {
-        String itemName = itemManager.getItemComposition(offer.getItemId()).getName();
+        String itemName = getItemName(offer.getItemId());
         String action = offer.getState() == GrandExchangeOfferState.BOUGHT ? "Bought" : "Sold";
         long totalValue = (long) offer.getPrice() * offer.getQuantitySold();
         String msg = String.format("GEX: %s %d x %s for %s gp (slot %d)",
@@ -791,7 +834,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     }
 
     private void notifyHighValue(int itemId, long margin, double confidence) {
-        String itemName = itemManager.getItemComposition(itemId).getName();
+        String itemName = getItemName(itemId);
         String msg = String.format("GEX: High-value signal for %s — margin %s gp, %.0f%% confidence",
             itemName, GpFormatter.format(margin), confidence);
         notifier.notify(msg);
@@ -935,6 +978,19 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
         boolean isExpired() {
             return System.currentTimeMillis() - cachedAt > ITEM_ML_CACHE_TTL_MS;
+        }
+    }
+
+    /**
+     * Cached item metadata from predictions.
+     */
+    private static class ItemMetadata {
+        final String name;
+        final int buyLimit;
+
+        ItemMetadata(String name, int buyLimit) {
+            this.name = name;
+            this.buyLimit = buyLimit;
         }
     }
 
