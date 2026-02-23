@@ -108,6 +108,12 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     private final Map<Integer, QueueEstimate> queueEstimateCache = new ConcurrentHashMap<>();
     private static final long QUEUE_ESTIMATE_CACHE_TTL_MS = 30_000; // 30 seconds
 
+    // Prediction tracking for accuracy dashboard
+    private final Map<Integer, PredictionRecord> activePredictions = new ConcurrentHashMap<>();
+    private volatile AccuracyStats cachedAccuracyStats = null;
+    private volatile long accuracyStatsFetchedAt = 0;
+    private static final long ACCURACY_STATS_CACHE_TTL_MS = 300_000; // 5 minutes
+
     private int eventsSent = 0;
     private volatile boolean connected = false;
 
@@ -223,6 +229,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         pendingMlFetches.clear();
         itemMetadataCache.clear();
         queueEstimateCache.clear();
+        activePredictions.clear();
     }
 
     @Provides
@@ -252,12 +259,21 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         // Reset stall notification on any state change
         stallNotifiedSlots.remove(slot);
 
-        // Notify on fill completion
+        // Notify on fill completion and submit accuracy outcome
         GrandExchangeOfferState state = offer.getState();
-        if (config.notifyFillCompletion()
-                && (state == GrandExchangeOfferState.BOUGHT || state == GrandExchangeOfferState.SOLD)
+        if ((state == GrandExchangeOfferState.BOUGHT || state == GrandExchangeOfferState.SOLD)
                 && fillNotifiedKeys.add(stateKey)) {
-            notifyFillCompletion(slot, offer);
+            // Submit prediction outcome for accuracy tracking
+            submitPredictionOutcome(slot, offer, true);
+
+            if (config.notifyFillCompletion()) {
+                notifyFillCompletion(slot, offer);
+            }
+        }
+
+        // Handle cancelled orders - submit as not filled
+        if ((state == GrandExchangeOfferState.CANCELLED_BUY || state == GrandExchangeOfferState.CANCELLED_SELL)) {
+            submitPredictionOutcome(slot, offer, false);
         }
 
         // Increment sequence number for this slot
@@ -396,6 +412,9 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         if (!config.enabled()) {
             return;
         }
+
+        // Also fetch accuracy stats when fetching market regime
+        fetchAccuracyStats();
 
         apiClient.fetchMarketRegimeAsync(new Callback() {
             @Override
@@ -685,6 +704,16 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                         willFillBeforeReset
                     );
 
+                    // Record prediction for accuracy tracking (only for active orders)
+                    GrandExchangeOfferState state = offer.getState();
+                    if (state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.SELLING) {
+                        if (!activePredictions.containsKey(i)) {
+                            activePredictions.put(i, new PredictionRecord(
+                                itemId, i, resolvedEta, confidence.doubleValue()
+                            ));
+                        }
+                    }
+
                     // Stall notification
                     if (config.notifyStall()
                             && (offer.getState() == GrandExchangeOfferState.BUYING || offer.getState() == GrandExchangeOfferState.SELLING)
@@ -965,6 +994,82 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         notifier.notify(msg);
     }
 
+    private void submitPredictionOutcome(int slot, GrandExchangeOffer offer, boolean filled) {
+        PredictionRecord prediction = activePredictions.remove(slot);
+        if (prediction == null || prediction.itemId != offer.getItemId()) {
+            return;
+        }
+
+        String accountHash = Long.toHexString(client.getAccountHash());
+        double actualMinutes = prediction.getActualMinutes();
+
+        apiClient.submitOutcomeAsync(
+            offer.getItemId(),
+            accountHash,
+            filled,
+            prediction.predictedEtaMinutes,
+            actualMinutes,
+            new Callback() {
+                @Override
+                public void onFailure(Call call, IOException e) {
+                    log.debug("Failed to submit prediction outcome: {}", e.getMessage());
+                }
+
+                @Override
+                public void onResponse(Call call, Response response) {
+                    response.close();
+                    log.debug("Submitted prediction outcome: item={} filled={} predicted={}m actual={}m",
+                        offer.getItemId(), filled, prediction.predictedEtaMinutes, actualMinutes);
+                }
+            }
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private void fetchAccuracyStats() {
+        if (System.currentTimeMillis() - accuracyStatsFetchedAt < ACCURACY_STATS_CACHE_TTL_MS) {
+            return;
+        }
+
+        apiClient.fetchAccuracyAsync(7, new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                log.debug("Failed to fetch accuracy stats: {}", e.getMessage());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) {
+                try {
+                    if (response.isSuccessful() && response.body() != null) {
+                        String body = response.body().string();
+                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        if (wrapper != null && wrapper.containsKey("data")) {
+                            Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
+                            Number total = (Number) data.get("total_predictions");
+                            Number correct = (Number) data.get("correct_predictions");
+                            Number accuracy = (Number) data.get("accuracy_percent");
+
+                            cachedAccuracyStats = new AccuracyStats(
+                                total != null ? total.intValue() : 0,
+                                correct != null ? correct.intValue() : 0,
+                                accuracy != null ? accuracy.doubleValue() : 0.0
+                            );
+                            accuracyStatsFetchedAt = System.currentTimeMillis();
+
+                            // Update panel with accuracy
+                            panel.updateAccuracy(cachedAccuracyStats.accuracyPercent,
+                                cachedAccuracyStats.totalPredictions);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Error processing accuracy stats: {}", e.getMessage());
+                } finally {
+                    response.close();
+                }
+            }
+        });
+    }
+
     private void notifyHighValue(int itemId, long margin, double confidence) {
         String itemName = getItemName(itemId);
         String msg = String.format("GEX: High-value signal for %s — margin %s gp, %.0f%% confidence",
@@ -1181,6 +1286,44 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
         boolean isExpired() {
             return System.currentTimeMillis() - cachedAt > QUEUE_ESTIMATE_CACHE_TTL_MS;
+        }
+    }
+
+    /**
+     * Tracks a prediction for accuracy measurement.
+     */
+    private static class PredictionRecord {
+        final int itemId;
+        final int slotIndex;
+        final double predictedEtaMinutes;
+        final double fillConfidence;
+        final long recordedAt;
+
+        PredictionRecord(int itemId, int slotIndex, double predictedEtaMinutes, double fillConfidence) {
+            this.itemId = itemId;
+            this.slotIndex = slotIndex;
+            this.predictedEtaMinutes = predictedEtaMinutes;
+            this.fillConfidence = fillConfidence;
+            this.recordedAt = System.currentTimeMillis();
+        }
+
+        double getActualMinutes() {
+            return (System.currentTimeMillis() - recordedAt) / 60000.0;
+        }
+    }
+
+    /**
+     * Cached accuracy statistics.
+     */
+    private static class AccuracyStats {
+        final int totalPredictions;
+        final int correctPredictions;
+        final double accuracyPercent;
+
+        AccuracyStats(int total, int correct, double accuracy) {
+            this.totalPredictions = total;
+            this.correctPredictions = correct;
+            this.accuracyPercent = accuracy;
         }
     }
 

@@ -501,4 +501,62 @@ public class GexApiClient {
     public interface HealthCheckCallback {
         void onResult(boolean healthy, String message);
     }
+
+    /**
+     * Fetches prediction accuracy metrics.
+     */
+    public void fetchAccuracyAsync(int days, Callback callback) {
+        if (isRateLimited()) {
+            callback.onFailure(null, new IOException("Rate limited"));
+            return;
+        }
+
+        String endpoint = buildEndpointUrl(config.apiEndpoint(),
+            "/api/v1/predictions/accuracy?days=" + days);
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Request request = buildRequest(endpoint)
+            .get()
+            .build();
+
+        httpClient.newCall(request).enqueue(wrapCallbackWithRateLimitHandling(callback));
+    }
+
+    /**
+     * Submits a prediction outcome for accuracy tracking.
+     */
+    public void submitOutcomeAsync(int itemId, String accountHash, boolean filled,
+                                    double predictedEta, double actualMinutes, Callback callback) {
+        if (isRateLimited()) {
+            callback.onFailure(null, new IOException("Rate limited"));
+            return;
+        }
+
+        String endpoint = buildEndpointUrl(config.apiEndpoint(), "/api/v1/predictions/outcome");
+        if (endpoint == null) {
+            callback.onFailure(null, new IOException("Invalid endpoint configuration"));
+            return;
+        }
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("item_id", itemId);
+        payload.put("account_hash", accountHash);
+        payload.put("prediction_type", "fill_probability");
+        payload.put("filled", filled);
+        if (predictedEta > 0 && actualMinutes > 0) {
+            payload.put("predicted_value", predictedEta);
+            payload.put("actual_minutes", actualMinutes);
+        }
+
+        String json = GSON.toJson(payload);
+
+        Request request = buildRequest(endpoint)
+            .post(RequestBody.create(JSON, json))
+            .build();
+
+        httpClient.newCall(request).enqueue(callback);
+    }
 }

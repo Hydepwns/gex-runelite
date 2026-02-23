@@ -23,6 +23,7 @@ public class GexPanel extends PluginPanel {
     private final JLabel statusLabel;
     private final JLabel riskLabel;
     private final JPanel riskPanel;
+    private final JLabel accuracyLabel;
 
     public GexPanel() {
         setLayout(new BorderLayout());
@@ -79,6 +80,15 @@ public class GexPanel extends PluginPanel {
         addStatRow(statsPanel, "Events Sent:", "0");
         addStatRow(statsPanel, "Active Orders:", "0");
         addStatRow(statsPanel, "Today's P&L:", "-");
+
+        // Accuracy row
+        JLabel accLabel = new JLabel("ML Accuracy:");
+        accLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        accuracyLabel = new JLabel("-");
+        accuracyLabel.setForeground(Color.WHITE);
+        accuracyLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+        statsPanel.add(accLabel);
+        statsPanel.add(accuracyLabel);
 
         contentPanel.add(statsPanel);
         contentPanel.add(Box.createVerticalStrut(10));
@@ -207,6 +217,34 @@ public class GexPanel extends PluginPanel {
                 statusColor = new Color(244, 67, 54); // Red for disconnected
             }
             statusLabel.setForeground(statusColor);
+        });
+    }
+
+    /**
+     * Update the ML accuracy display.
+     * @param accuracyPercent Accuracy percentage (0-100)
+     * @param totalPredictions Total number of predictions
+     */
+    public void updateAccuracy(double accuracyPercent, int totalPredictions) {
+        SwingUtilities.invokeLater(() -> {
+            if (totalPredictions == 0) {
+                accuracyLabel.setText("-");
+                accuracyLabel.setForeground(Color.WHITE);
+            } else {
+                String text = String.format("%.0f%% (%d)", accuracyPercent, totalPredictions);
+                accuracyLabel.setText(text);
+
+                // Color by accuracy: green >= 70%, yellow >= 50%, red < 50%
+                Color color;
+                if (accuracyPercent >= 70) {
+                    color = RISK_LOW_COLOR;
+                } else if (accuracyPercent >= 50) {
+                    color = RISK_MEDIUM_COLOR;
+                } else {
+                    color = RISK_HIGH_COLOR;
+                }
+                accuracyLabel.setForeground(color);
+            }
         });
     }
 
