@@ -43,8 +43,8 @@ import java.util.concurrent.*;
 @Slf4j
 @PluginDescriptor(
     name = "GEX",
-    description = "GE telemetry for GEX trading assistant",
-    tags = {"grand exchange", "trading", "telemetry"}
+    description = "Crowdsourced GE fill data - see actual fill times from real trades, not wiki guesses. Day-aware ETAs and margin overlay.",
+    tags = {"grand exchange", "trading", "flipping", "margins", "fill time"}
 )
 public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener {
 
@@ -356,7 +356,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             return;
         }
 
-        String accountHash = Long.toHexString(client.getAccountHash());
+        String accountHash = hashAccountId(client.getAccountHash());
 
         apiClient.fetchSlotsWithEstimatesAsync(accountHash, new Callback() {
             @Override
@@ -551,7 +551,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             return;
         }
 
-        String accountHash = Long.toHexString(client.getAccountHash());
+        String accountHash = hashAccountId(client.getAccountHash());
 
         // Also fetch queue estimates
         fetchQueueEstimates();
@@ -900,7 +900,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         long accountHash = client.getAccountHash();
         String timestamp = ISO_FORMATTER.format(Instant.now().atOffset(ZoneOffset.UTC));
 
-        payload.put("account_hash", Long.toHexString(accountHash));
+        payload.put("account_hash", hashAccountId(accountHash));
         payload.put("timestamp", timestamp);
         payload.put("event_type", eventType);
 
@@ -922,6 +922,27 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         payload.put("slot", slot);
 
         return payload;
+    }
+
+    /**
+     * Hash the RuneLite account hash with SHA-256 for privacy.
+     * This ensures the raw RuneLite hash is never transmitted or stored.
+     */
+    private String hashAccountId(long accountId) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            // Include a fixed prefix to prevent rainbow table attacks
+            String input = "gex:" + accountId;
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 16; i++) { // 32 hex chars (128 bits) - sufficient for uniqueness
+                sb.append(String.format("%02x", hash[i]));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is always available, but fallback just in case
+            return Long.toHexString(accountId);
+        }
     }
 
     private String generateIdempotencyKey(long accountHash, int slot, GrandExchangeOffer offer, String timestamp) {
@@ -1000,7 +1021,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
             return;
         }
 
-        String accountHash = Long.toHexString(client.getAccountHash());
+        String accountHash = hashAccountId(client.getAccountHash());
         double actualMinutes = prediction.getActualMinutes();
 
         apiClient.submitOutcomeAsync(
