@@ -49,7 +49,6 @@ import java.util.concurrent.*;
 public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener {
 
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_INSTANT;
-    private static final Gson GSON = GexApiClient.getGson();
 
     private static final int BATCH_INTERVAL_MS = 5000;
     private static final long HIGH_VALUE_COOLDOWN_MS = 600_000;
@@ -82,6 +81,9 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
 
     @Inject
     private KeyManager keyManager;
+
+    @Inject
+    private Gson gson;
 
     private GexApiClient apiClient;
     private QuickPriceKeyListener quickPriceKeyListener;
@@ -139,11 +141,14 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     private volatile boolean evictionWarningShown = false;
 
     // Fill curve cache: itemId -> cached data
-    private final FillCurveCache fillCurveCache = new FillCurveCache();
+    private FillCurveCache fillCurveCache;
 
     @Override
     protected void startUp() {
         log.info("GEX plugin started");
+
+        // Initialize fill curve cache with injected Gson
+        fillCurveCache = new FillCurveCache(gson);
 
         // Validate endpoint URL
         String endpointError = GexApiClient.validateEndpointUrl(config.apiEndpoint());
@@ -153,7 +158,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
         }
 
         // Set up API client
-        apiClient = new GexApiClient(httpClient, executor, config);
+        apiClient = new GexApiClient(httpClient, executor, config, gson);
         apiClient.setConnectionListener(this);
 
         // Perform health check on startup
@@ -369,7 +374,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 try {
                     if (response.isSuccessful() && response.body() != null) {
                         String body = response.body().string();
-                        Map<String, Object> data = GSON.fromJson(body, Map.class);
+                        Map<String, Object> data = gson.fromJson(body, Map.class);
                         if (data != null && data.containsKey("slots")) {
                             List<?> slots = (List<?>) data.get("slots");
                             for (Object slotObj : slots) {
@@ -427,7 +432,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 try {
                     if (response.isSuccessful() && response.body() != null) {
                         String body = response.body().string();
-                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        Map<String, Object> wrapper = gson.fromJson(body, Map.class);
                         if (wrapper != null && wrapper.containsKey("data")) {
                             Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
                             String riskLevel = (String) data.get("risk_level");
@@ -468,7 +473,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 try {
                     if (response.isSuccessful() && response.body() != null) {
                         String body = response.body().string();
-                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        Map<String, Object> wrapper = gson.fromJson(body, Map.class);
                         if (wrapper != null && wrapper.containsKey("data")) {
                             Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
 
@@ -583,7 +588,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
     @SuppressWarnings("unchecked")
     private void processSlotPredictions(String json, GrandExchangeOffer[] offers) {
         try {
-            Map<String, Object> data = GSON.fromJson(json, Map.class);
+            Map<String, Object> data = gson.fromJson(json, Map.class);
             if (data == null) {
                 log.debug("Empty response from predictions endpoint");
                 return;
@@ -1063,7 +1068,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 try {
                     if (response.isSuccessful() && response.body() != null) {
                         String body = response.body().string();
-                        Map<String, Object> wrapper = GSON.fromJson(body, Map.class);
+                        Map<String, Object> wrapper = gson.fromJson(body, Map.class);
                         if (wrapper != null && wrapper.containsKey("data")) {
                             Map<String, Object> data = (Map<String, Object>) wrapper.get("data");
                             Number total = (Number) data.get("total_predictions");
@@ -1513,7 +1518,7 @@ public class GexPlugin extends Plugin implements GexApiClient.ConnectionListener
                 try {
                     if (response.isSuccessful() && response.body() != null) {
                         String body = response.body().string();
-                        Map<String, Object> data = GSON.fromJson(body, Map.class);
+                        Map<String, Object> data = gson.fromJson(body, Map.class);
 
                         if (data != null && data.containsKey("optimal_price")) {
                             Number optimalPrice = (Number) data.get("optimal_price");

@@ -1,6 +1,7 @@
 package foo.droo.gex;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -26,7 +27,7 @@ import static org.junit.Assert.*;
  */
 public class NetworkLayerTest {
 
-    private static final Gson GSON = GexApiClient.getGson();
+    private static final Gson GSON = new GsonBuilder().create();
     private MockWebServer mockServer;
 
     @Before

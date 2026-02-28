@@ -15,17 +15,18 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class FillCurveCache {
 
-    private static final Gson GSON = GexApiClient.getGson();
     private static final long DEFAULT_TTL_MS = 180_000; // 3 minutes (reduced for fresher regime data)
 
     private final Map<Integer, FillCurveEntry> cache = new ConcurrentHashMap<>();
     private final long ttlMs;
+    private final Gson gson;
 
-    public FillCurveCache() {
-        this(DEFAULT_TTL_MS);
+    public FillCurveCache(Gson gson) {
+        this(gson, DEFAULT_TTL_MS);
     }
 
-    public FillCurveCache(long ttlMs) {
+    public FillCurveCache(Gson gson, long ttlMs) {
+        this.gson = gson;
         this.ttlMs = ttlMs;
     }
 
@@ -84,7 +85,7 @@ public class FillCurveCache {
         int skippedCount = 0;
 
         try {
-            Map<String, Object> envelope = GSON.fromJson(json, Map.class);
+            Map<String, Object> envelope = gson.fromJson(json, Map.class);
             if (envelope == null) {
                 log.warn("FillCurveCache: batch response is null");
                 return 0;
@@ -135,7 +136,7 @@ public class FillCurveCache {
                 // Wrap the item data in the expected format
                 Map<String, Object> wrappedData = new HashMap<>();
                 wrappedData.put("data", item);
-                String wrappedJson = GSON.toJson(wrappedData);
+                String wrappedJson = gson.toJson(wrappedData);
 
                 FillCurveData data = parseFillCurveResponse(wrappedJson);
                 if (data != null) {
@@ -192,9 +193,9 @@ public class FillCurveCache {
      * Parses fill curve response JSON into FillCurveData.
      */
     @SuppressWarnings("unchecked")
-    public static FillCurveData parseFillCurveResponse(String json) {
+    public FillCurveData parseFillCurveResponse(String json) {
         try {
-            Map<String, Object> envelope = GSON.fromJson(json, Map.class);
+            Map<String, Object> envelope = gson.fromJson(json, Map.class);
             Map<String, Object> data = (Map<String, Object>) envelope.get("data");
             if (data == null) return null;
 

@@ -1,7 +1,6 @@
 package foo.droo.gex;
 
 import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
 
@@ -28,7 +27,6 @@ public class GexApiClient {
 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
     private static final MediaType JSON_GZIP = MediaType.parse("application/json");
-    private static final Gson GSON = new GsonBuilder().create();
 
     private static final int MAX_RETRY_ATTEMPTS = 4;
     private static final int[] RETRY_DELAYS_MS = {1000, 2000, 4000, 8000};
@@ -47,6 +45,7 @@ public class GexApiClient {
     private final OkHttpClient httpClient;
     private final ScheduledExecutorService executor;
     private final GexConfig config;
+    private final Gson gson;
 
     public interface ConnectionListener {
         void onConnectionStatusChanged(boolean connected);
@@ -54,7 +53,7 @@ public class GexApiClient {
 
     private ConnectionListener connectionListener;
 
-    public GexApiClient(OkHttpClient httpClient, ScheduledExecutorService executor, GexConfig config) {
+    public GexApiClient(OkHttpClient httpClient, ScheduledExecutorService executor, GexConfig config, Gson gson) {
         // Configure client with explicit timeouts
         this.httpClient = httpClient.newBuilder()
             .connectTimeout(CONNECT_TIMEOUT_SECONDS, SECONDS)
@@ -63,6 +62,7 @@ public class GexApiClient {
             .build();
         this.executor = executor;
         this.config = config;
+        this.gson = gson;
     }
 
     public void setConnectionListener(ConnectionListener listener) {
@@ -138,7 +138,7 @@ public class GexApiClient {
         Map<String, Object> batchPayload = new HashMap<>();
         batchPayload.put("events", batch);
 
-        String json = GSON.toJson(batchPayload);
+        String json = gson.toJson(batchPayload);
         byte[] compressed = compressGzip(json);
         if (compressed == null) {
             compressed = json.getBytes(StandardCharsets.UTF_8);
@@ -226,7 +226,7 @@ public class GexApiClient {
         requestPayload.put("item_ids", itemIds);
         requestPayload.put("account_hash", accountHash);
 
-        String json = GSON.toJson(requestPayload);
+        String json = gson.toJson(requestPayload);
 
         Request request = buildRequest(predictEndpoint)
             .post(RequestBody.create(JSON, json))
@@ -338,7 +338,7 @@ public class GexApiClient {
 
         Map<String, Object> requestBody = new HashMap<>();
         requestBody.put("item_ids", itemIds);
-        String jsonBody = GSON.toJson(requestBody);
+        String jsonBody = gson.toJson(requestBody);
 
         Request request = buildRequest(batchEndpoint)
             .post(RequestBody.create(JSON, jsonBody))
@@ -402,8 +402,8 @@ public class GexApiClient {
     /**
      * Returns the Gson instance for JSON parsing.
      */
-    public static Gson getGson() {
-        return GSON;
+    public Gson getGson() {
+        return gson;
     }
 
     private void notifyConnectionStatus(boolean connected) {
@@ -551,7 +551,7 @@ public class GexApiClient {
             payload.put("actual_minutes", actualMinutes);
         }
 
-        String json = GSON.toJson(payload);
+        String json = gson.toJson(payload);
 
         Request request = buildRequest(endpoint)
             .post(RequestBody.create(JSON, json))

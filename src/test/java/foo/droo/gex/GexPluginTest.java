@@ -1,5 +1,7 @@
 package foo.droo.gex;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import net.runelite.api.GrandExchangeOfferState;
 import org.junit.Test;
 
@@ -13,6 +15,8 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class GexPluginTest {
+
+    private static final Gson GSON = new GsonBuilder().create();
 
     @Test
     public void testMapStateBuying() {
@@ -103,7 +107,8 @@ public class GexPluginTest {
                 + "\"daily_grid\":[{\"day_of_week\":6,\"hours\":{\"10\":{\"avg\":80.0,\"median\":60.0,\"p90\":200.0,\"samples\":5}}}]"
                 + "}]}}";
 
-        FillCurveCache.FillCurveData data = FillCurveCache.parseFillCurveResponse(json);
+        FillCurveCache cache = new FillCurveCache(GSON);
+        FillCurveCache.FillCurveData data = cache.parseFillCurveResponse(json);
 
         assertNotNull(data);
         assertNotNull(data.aggregateByHour);
@@ -120,13 +125,15 @@ public class GexPluginTest {
     public void testParseFillCurveResponseEmptyCurves() {
         String json = "{\"data\":{\"item_id\":440,\"item_name\":\"Iron ore\",\"curves\":[]}}";
 
-        FillCurveCache.FillCurveData data = FillCurveCache.parseFillCurveResponse(json);
+        FillCurveCache cache = new FillCurveCache(GSON);
+        FillCurveCache.FillCurveData data = cache.parseFillCurveResponse(json);
         assertNull(data);
     }
 
     @Test
     public void testParseFillCurveResponseInvalid() {
-        FillCurveCache.FillCurveData data = FillCurveCache.parseFillCurveResponse("not json");
+        FillCurveCache cache = new FillCurveCache(GSON);
+        FillCurveCache.FillCurveData data = cache.parseFillCurveResponse("not json");
         assertNull(data);
     }
 
@@ -135,7 +142,7 @@ public class GexPluginTest {
     @Test
     public void testDayAwareEtaPrefersDaySpecific() {
         // Build a cache with day-specific data for current day/hour
-        FillCurveCache cache = new FillCurveCache();
+        FillCurveCache cache = new FillCurveCache(GSON);
 
         Map<Integer, Map<String, Number>> aggByHour = new HashMap<>();
         Map<String, Number> aggStats = new HashMap<>();
@@ -172,7 +179,7 @@ public class GexPluginTest {
 
     @Test
     public void testDayAwareEtaDisabledReturnsPrediction() {
-        FillCurveCache cache = new FillCurveCache();
+        FillCurveCache cache = new FillCurveCache(GSON);
 
         double[] result = GexPlugin.resolveDayAwareEta(440, 5.0, cache, false);
 
@@ -182,7 +189,7 @@ public class GexPluginTest {
 
     @Test
     public void testDayAwareEtaFallsBackWithNoCache() {
-        FillCurveCache cache = new FillCurveCache();
+        FillCurveCache cache = new FillCurveCache(GSON);
 
         double[] result = GexPlugin.resolveDayAwareEta(440, 7.5, cache, true);
 
@@ -193,7 +200,7 @@ public class GexPluginTest {
     @Test
     public void testDayAwareEtaExpiredCacheFallsBack() {
         // Use short TTL cache to test expiration
-        FillCurveCache cache = new FillCurveCache(1); // 1ms TTL
+        FillCurveCache cache = new FillCurveCache(GSON, 1); // 1ms TTL
 
         Map<Integer, Map<String, Number>> aggByHour = new HashMap<>();
         Map<Integer, Map<Integer, Map<String, Number>>> dailyGrid = new HashMap<>();
